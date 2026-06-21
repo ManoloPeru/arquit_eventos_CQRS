@@ -1,0 +1,94 @@
+#version: "3.7"
+
+services:
+  # ---------------------------------------------------------------------------
+  # POSTGRES: Base de datos relacional (Almacenamiento primario / Escritura)
+  # ---------------------------------------------------------------------------
+  postgres:
+    build: './database' # Compila usando el Dockerfile local (con postgres:16-alpine)
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # NATS: El Bus de Eventos (Event Bus) encargado del paso de mensajes
+  # ---------------------------------------------------------------------------
+  nats:
+    image: "nats:2.14.2-alpine" # Versión moderna y ultraligera que sugerimos
+    # NOTA: Si vas a usar JetStream para persistir los eventos en disco,
+    # se suele agregar aquí: command: "-js"
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # ELASTICSEARCH: Motor de búsqueda optimizado (Read Model en CQRS)
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: "docker.elastic.co/elasticsearch/elasticsearch:6.2.3"
+    environment:
+      - "discovery.type=single-node" # Modo nodo único para desarrollo (evita buscar clusters)
+
+  # ---------------------------------------------------------------------------
+  # MICROSERVICIO: FEED SERVICE (Lado del Comando / Escritura)
+  # Recibe nuevas publicaciones HTTP, escribe en Postgres y publica en NATS.
+  # ---------------------------------------------------------------------------
+  feed:
+    build: "."                    # Compila el Dockerfile de la raíz del proyecto
+    command: "feed-service"       # Ejecuta el binario compilado exclusivo de comandos
+    depends_on:
+      - "postgres"
+      - "nats"
+    ports:
+      - "8080"                    # Docker asigna un puerto aleatorio en el host para evitar colisiones
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      NATS_ADDRESS: "nats:4222"   # Se comunica internamente con el contenedor de NATS en su puerto base
+
+  # ---------------------------------------------------------------------------
+  # MICROSERVICIO: QUERY SERVICE (Lado de la Consulta / Lectura)
+  # Atiende búsquedas leyendo de Elasticsearch y mantiene sincronizadas las proyecciones.
+  # ---------------------------------------------------------------------------
+  query:
+    build: "."
+    command: "query-service"      # Ejecuta el binario exclusivo de consultas
+    depends_on:
+      - "postgres"
+      - "nats"
+      - "elasticsearch"
+    ports:
+      - "8080"
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DB: "postgres"
+      NATS_ADDRESS: "nats:4222"
+      ELASTICSEARCH_ADDRESS: "elasticsearch:9200" # Conexión interna al motor de búsqueda
+
+  # ---------------------------------------------------------------------------
+  # MICROSERVICIO: PUSHER SERVICE (Tiempo Real / Notificaciones)
+  # Escucha eventos de NATS y los empuja por WebSockets al cliente final.
+  # ---------------------------------------------------------------------------
+  pusher:
+    build: "."
+    command: "pusher-service"     # Ejecuta el binario de WebSockets
+    depends_on:
+      - "nats"
+    ports:
+      - "8080"
+    environment:
+      NATS_ADDRESS: "nats:4222"
+
+  # ---------------------------------------------------------------------------
+  # NGINX: Puerta de Entrada Única (Reverse Proxy / API Gateway)
+  # ---------------------------------------------------------------------------
+  nginx:
+    build: "./nginx"              # Compila el balanceador/ruteador con la conf del curso
+    ports:
+      - "8080:80"                 # Expone el puerto REAL 8080 en tu máquina física hacia el puerto 80 interno
+    depends_on:
+      - feed
+      - query
+      - pusher                    # Se asegura de levantar Nginx solo cuando los backend ya están corriendo

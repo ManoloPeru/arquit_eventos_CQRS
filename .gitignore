@@ -1,0 +1,11 @@
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.pid
+bin/
+dist/
+/usr/bin/
+.env
+.docker/
